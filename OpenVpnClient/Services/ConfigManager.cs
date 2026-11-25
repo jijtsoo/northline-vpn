@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using OpenVpnClient.Models;
 
 namespace OpenVpnClient.Services
@@ -97,29 +96,19 @@ namespace OpenVpnClient.Services
             if (string.IsNullOrWhiteSpace(config.PasswordBlob))
                 return null;
 
-            try
-            {
-                return SecretBox.Unprotect(config.PasswordBlob);
-            }
-            catch
-            {
-                return null;
-            }
+            try { return SecretBox.Unprotect(config.PasswordBlob); }
+            catch { return null; }
         }
 
         private void Load()
         {
             if (!File.Exists(_indexFile)) return;
-
             try
             {
                 var json = File.ReadAllText(_indexFile);
                 _configs = JsonSerializer.Deserialize<List<VpnConfig>>(json) ?? new();
             }
-            catch
-            {
-                _configs = new();
-            }
+            catch { _configs = new(); }
         }
 
         private void Save()
@@ -131,24 +120,18 @@ namespace OpenVpnClient.Services
         private static string RewriteAndCopy(string raw, string sourceDir, string destDir, ref bool requiresAuth)
         {
             var sb = new StringBuilder();
-            foreach (var line in SplitLines(raw))
+            foreach (var line in raw.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n'))
             {
                 var trimmed = line.Trim();
-                if (trimmed.Length == 0 || trimmed.StartsWith("#") || trimmed.StartsWith(";"))
+                if (trimmed.Length == 0 || trimmed[0] == '#' || trimmed[0] == ';')
                 {
                     sb.AppendLine(line);
                     continue;
                 }
 
-                var match = Regex.Match(trimmed, @"^(?<dir>[\\w-]+)(?:\\s+(?<rest>.+))?$");
-                if (!match.Success)
-                {
-                    sb.AppendLine(line);
-                    continue;
-                }
-
-                var dir = match.Groups["dir"].Value;
-                var rest = match.Groups["rest"].Success ? match.Groups["rest"].Value.Trim() : "";
+                var space = trimmed.IndexOf(' ');
+                var dir = space < 0 ? trimmed : trimmed.Substring(0, space);
+                var rest = space < 0 ? "" : trimmed.Substring(space + 1).Trim();
 
                 if (dir.Equals("auth-user-pass", StringComparison.OrdinalIgnoreCase))
                 {
@@ -157,31 +140,28 @@ namespace OpenVpnClient.Services
                     continue;
                 }
 
-                if (!FileDirectives.Contains(dir) || string.IsNullOrWhiteSpace(rest))
+                if (!FileDirectives.Contains(dir) || rest.Length == 0)
                 {
                     sb.AppendLine(line);
                     continue;
                 }
 
-                var parts = SplitArgs(rest);
-                if (parts.Count == 0 || parts[0].Equals("[inline]", StringComparison.OrdinalIgnoreCase))
+                var parts = rest.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                var referenced = parts[0].Trim('"', '\'');
+                if (referenced.Equals("[inline]", StringComparison.OrdinalIgnoreCase))
                 {
                     sb.AppendLine(line);
                     continue;
                 }
 
-                var referenced = Unquote(parts[0]);
-                var full = Path.IsPathRooted(referenced)
-                    ? referenced
-                    : Path.Combine(sourceDir, referenced);
-
+                var full = Path.IsPathRooted(referenced) ? referenced : Path.Combine(sourceDir, referenced);
                 if (File.Exists(full))
                 {
                     var fileName = Path.GetFileName(full);
                     var target = Path.Combine(destDir, fileName);
                     if (!File.Exists(target))
                         File.Copy(full, target, false);
-                    parts[0] = QuoteIfNeeded(fileName);
+                    parts[0] = fileName;
                     sb.AppendLine(dir + " " + string.Join(" ", parts));
                 }
                 else
@@ -192,57 +172,5 @@ namespace OpenVpnClient.Services
 
             return sb.ToString();
         }
-
-        private static IEnumerable<string> SplitLines(string raw) =>
-            raw.Replace("\\r\\n", "\\n").Replace('\\r', '\\n').Split('\\n');
-
-        private static List<string> SplitArgs(string rest)
-        {
-            var parts = new List<string>();
-            var current = new StringBuilder();
-            var quote = '\\0';
-
-            foreach (var ch in rest)
-            {
-                if (quote == '\\0' && (ch == '"' || ch == '\\''))
-                {
-                    quote = ch;
-                    current.Append(ch);
-                }
-                else if (quote != '\\0' && ch == quote)
-                {
-                    current.Append(ch);
-                    quote = '\\0';
-                }
-                else if (quote == '\\0' && char.IsWhiteSpace(ch))
-                {
-                    if (current.Length > 0)
-                    {
-                        parts.Add(current.ToString());
-                        current.Clear();
-                    }
-                }
-                else
-                {
-                    current.Append(ch);
-                }
-            }
-
-            if (current.Length > 0)
-                parts.Add(current.ToString());
-
-            return parts;
-        }
-
-        private static string Unquote(string value)
-        {
-            if (value.Length >= 2 &&
-                ((value[0] == '"' && value[^1] == '"') || (value[0] == '\\'' && value[^1] == '\\'')))
-                return value[1..^1];
-            return value;
-        }
-
-        private static string QuoteIfNeeded(string value) =>
-            value.Any(char.IsWhiteSpace) ? $"\\"{value}\\"" : value;
     }
 }
